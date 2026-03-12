@@ -88,10 +88,28 @@ export default function App() {
   const [votePopupPosition, setVotePopupPosition] = useState(() => getDefaultVotePopupPosition());
   const [gameOverPopupPosition, setGameOverPopupPosition] = useState(null);
   const [ambiguousPopupPosition, setAmbiguousPopupPosition] = useState(null);
+  const [isMobileMode, setIsMobileMode] = useState(false);
   
   const boardRef = useRef(null);
   const roomRef = useRef(null);
   const voteRevealTimerRef = useRef(null);
+
+  useEffect(() => {
+    const detectMobileMode = () => {
+      const hasCoarsePointer = window.matchMedia('(pointer: coarse)').matches;
+      const isNarrowScreen = window.innerWidth <= 900;
+      setIsMobileMode(hasCoarsePointer && isNarrowScreen);
+    };
+
+    detectMobileMode();
+    window.addEventListener('resize', detectMobileMode);
+    return () => window.removeEventListener('resize', detectMobileMode);
+  }, []);
+
+  useEffect(() => {
+    if (!isMobileMode) return;
+    setDragPos({x: 0, y: 0});
+  }, [isMobileMode]);
 
   useEffect(() => {
     if (!roomId || !playerId) return;
@@ -470,13 +488,28 @@ export default function App() {
   };
 
   const onDragStart = (e, tile) => {
-    if (myPlayerIndex !== gameState.currentPlayer || gameState.pendingVote || gameState.gameEnded || ambiguousPlacement) return;
+    if (isMobileMode || myPlayerIndex !== gameState.currentPlayer || gameState.pendingVote || gameState.gameEnded || ambiguousPlacement) return;
     e.dataTransfer.effectAllowed = 'move';
     setDragging(tile);
     const placedTilesArray = normalizeCollection(gameState.placedTiles);
     const moves = calcMovesForState(tile, gameState.board, gameState.workers, placedTilesArray);
     setValidMoves(moves);
     setDragPos({x: e.clientX, y: e.clientY});
+  };
+
+  const onTileTapSelect = (tile) => {
+    if (!isMobileMode || myPlayerIndex !== gameState.currentPlayer || gameState.pendingVote || gameState.gameEnded || ambiguousPlacement) return;
+    if (dragging?.id === tile.id) {
+      setDragging(null);
+      setValidMoves([]);
+      setPreviewMove(null);
+      return;
+    }
+    setDragging(tile);
+    const placedTilesArray = normalizeCollection(gameState.placedTiles);
+    const moves = calcMovesForState(tile, gameState.board, gameState.workers, placedTilesArray);
+    setValidMoves(moves);
+    setPreviewMove(null);
   };
 
   const onDrag = (e) => {
@@ -502,6 +535,7 @@ export default function App() {
   };
 
   const onDragOver = (e) => {
+    if (isMobileMode) return;
     e.preventDefault();
     e.stopPropagation();
     if(!dragging || !boardRef.current) return;
@@ -527,6 +561,7 @@ export default function App() {
   };
 
   const onDrop = async (e) => {
+    if (isMobileMode) return;
     e.preventDefault();
     e.stopPropagation();
     if(!dragging || !boardRef.current) return;
@@ -573,6 +608,66 @@ export default function App() {
       return;
     }
     
+    await placeTile(moveToPlace, dragging);
+  };
+
+  const onBoardTap = async (e) => {
+    if (!isMobileMode || !dragging || !boardRef.current) return;
+    const rect = boardRef.current.getBoundingClientRect();
+    const clientX = e.clientX ?? e.touches?.[0]?.clientX;
+    const clientY = e.clientY ?? e.touches?.[0]?.clientY;
+    if (typeof clientX !== 'number' || typeof clientY !== 'number') return;
+
+    const svgX = ((clientX - rect.left) / rect.width) * 2000;
+    const svgY = ((clientY - rect.top) / rect.height) * 1426;
+    let tapCell = null;
+
+    for (let c = 0; c < 15; c++) {
+      for (let r = 0; r < 10; r++) {
+        if (svgX >= V[c] && svgX < V[c + 1] && svgY >= H[r] && svgY < H[r + 1]) {
+          tapCell = { c, r };
+          break;
+        }
+      }
+      if (tapCell) break;
+    }
+
+    if (!tapCell) return;
+
+    const moveToPlace = validMoves.find(m => m.cells.some(([c, r]) => c === tapCell.c && r === tapCell.r));
+    if (!moveToPlace) {
+      setPreviewMove(null);
+      return;
+    }
+
+    setPreviewMove(moveToPlace);
+
+    const ambiguousRailroad = dragging.type.startsWith('Railroad') ? findAmbiguousRailroadPlacements(validMoves, tapCell) : null;
+    if (ambiguousRailroad) {
+      setAmbiguousPlacement({
+        tile: dragging,
+        options: ambiguousRailroad,
+        selectedTrack: moveToPlace.track,
+        selectedMove: ambiguousRailroad[moveToPlace.track] || moveToPlace
+      });
+      setDragging(null);
+      setValidMoves([]);
+      setPreviewMove(null);
+      return;
+    }
+
+    if (checkOuthouses(moveToPlace.cells)) {
+      await update(ref(database, `rooms/${roomId}`), {
+        pendingVote: { move: moveToPlace, tile: dragging },
+        voteSelections: {},
+        voteSubmitted: {}
+      });
+      setDragging(null);
+      setValidMoves([]);
+      setPreviewMove(null);
+      return;
+    }
+
     await placeTile(moveToPlace, dragging);
   };
 
@@ -1000,14 +1095,65 @@ export default function App() {
     y: Math.max(20, (window.innerHeight - 260) / 2)
   };
   const currentAmbiguousPopupPosition = ambiguousPopupPosition || ambiguousPopupDefault;
+  const canPlayTile = selectedPlayerName === myName && myPlayerIndex === gameState.currentPlayer && !gameState.pendingVote && !gameState.gameEnded && !ambiguousPlacement;
+
+  const tilePanel = (
+    <div style={{background:'white',padding:'8px',borderRadius:'10px',flex:isMobileMode ? '0 0 auto' : 1,display:'flex',flexDirection:'column',minHeight:isMobileMode ? '220px' : 0,maxHeight:isMobileMode ? '40vh' : 'none',overflow:'hidden'}}>
+      <h4 style={{margin:'0 0 8px 0',fontSize:'13px'}}>
+        {selectedPlayerName === myName ? 'Your Tiles' : `${selectedPlayerName}'s Tiles`} ({(gameState.tiles[selectedPlayerName] || []).length})
+      </h4>
+      <div style={{overflowY:'auto',flex:1,paddingRight:'5px',WebkitOverflowScrolling:'touch'}}>
+        <div style={{display:'grid',gridTemplateColumns:'repeat(3,1fr)',gap:'8px',alignContent:'start'}}>
+          {(gameState.tiles[selectedPlayerName] || []).map(t => (
+            <div
+              key={`${selectedPlayerName}-${t.id}`}
+              draggable={!isMobileMode && canPlayTile}
+              onDragStart={(e)=>onDragStart(e,t)}
+              onDrag={onDrag}
+              onDragEnd={onDragEnd}
+              onClick={() => onTileTapSelect(t)}
+              style={{
+                height:'72px',
+                border: dragging?.id === t.id ? '2px solid #2E86FF' : '1px solid #ccc',
+                borderRadius:'4px',
+                cursor: isMobileMode ? (canPlayTile ? 'pointer' : 'default') : (canPlayTile ? 'grab' : 'default'),
+                padding:'4px',
+                background: dragging?.id === t.id ? '#EAF3FF' : 'white',
+                opacity: !isMobileMode && dragging?.id === t.id ? 0 : 1,
+                display:'flex',
+                alignItems:'center',
+                justifyContent:'center'
+              }}
+            >
+              <img src={IMAGES[t.type]} style={{maxWidth:'100%',maxHeight:'100%',width:'auto',height:'auto',objectFit:'contain',display:'block',pointerEvents:'none'}} alt="" draggable={false}/>
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
 
   return (
-    <div style={{padding:'8px 12px',background:'#F5DEB3',height:'100vh',overflow:'hidden'}}>
-      <div style={{display:'flex',gap:'10px',height:'calc(100vh - 16px)'}}>
+    <div style={{padding:'8px 12px',background:'#F5DEB3',height:'100vh',overflowY:isMobileMode ? 'auto' : 'hidden'}}>
+      <div style={{display:'flex',gap:'10px',height:isMobileMode ? 'auto' : 'calc(100vh - 16px)',flexDirection:isMobileMode ? 'column' : 'row'}}>
         {/* Board */}
-        <div style={{flex:'1 1 auto',minWidth:0}}>
-          <div ref={boardRef} onDragOver={onDragOver} onDrop={onDrop} style={{background:'white',padding:'8px',borderRadius:'10px',position:'relative'}}>
+        <div style={{flex:'1 1 auto',minWidth:0,order:isMobileMode ? 2 : 1}}>
+          <div ref={boardRef} onDragOver={onDragOver} onDrop={onDrop} onClick={onBoardTap} style={{background:'white',padding:'8px',borderRadius:'10px',position:'relative'}}>
             <img src={IMAGES.board} style={{width:'100%',display:'block',border:'3px solid #8B4513',borderRadius:'5px'}} alt=""/>
+            {isMobileMode && dragging && (
+              <button
+                onClick={(e) => {
+                  e.stopPropagation();
+                  setDragging(null);
+                  setValidMoves([]);
+                  setPreviewMove(null);
+                }}
+                style={{position:'absolute',top:'12px',left:'12px',zIndex:20,border:'2px solid #2E86FF',borderRadius:'8px',background:'white',padding:'2px',cursor:'pointer'}}
+                aria-label="Deselect tile"
+              >
+                <img src={IMAGES[dragging.type]} style={{width:'52px',height:'52px',objectFit:'contain',display:'block'}} alt="Selected tile" draggable={false}/>
+              </button>
+            )}
             <svg style={{position:'absolute',top:'8px',left:'8px',width:'calc(100% - 16px)',height:'calc(100% - 16px)',pointerEvents:'all'}} viewBox="0 0 2000 1426">
               {dragging && validMoves.map((m,i) => m.cells.map(([c,r],j) => {
                 const hover = previewMove?.cells.some(([hc,hr]) => hc===c && hr===r);
@@ -1104,13 +1250,13 @@ export default function App() {
         </div>
 
         {/* Sidebar */}
-        <div style={{flex:'0 0 min(340px, 31vw)',display:'flex',flexDirection:'column',gap:'8px',minHeight:0}}>
+        <div style={{flex:isMobileMode ? '0 0 auto' : '0 0 min(340px, 31vw)',display:'flex',flexDirection:'column',gap:'8px',minHeight:0,order:isMobileMode ? 1 : 2}}>
           <div style={{background:'white',padding:'8px 10px',borderRadius:'10px',fontSize:'14px',fontWeight:'bold'}}>
             Current Turn: {currentPlayerName}
           </div>
 
           <div style={{background:'white',padding:'8px',borderRadius:'10px'}}>
-            <div style={{display:'grid',gridTemplateColumns:'repeat(6, minmax(0,1fr))',gap:'4px'}}>
+            <div style={{display:'grid',gridTemplateColumns:isMobileMode ? 'repeat(3, minmax(0,1fr))' : 'repeat(6, minmax(0,1fr))',gap:'4px'}}>
               {BUILDING_TYPES.map(type => (
                 <div key={type} style={{display:'flex',flexDirection:'column',alignItems:'center',padding:'2px 1px'}}>
                   <img src={IMAGES[type]} alt={type} style={{width:'50px',height:'50px',objectFit:'contain'}}/>
@@ -1121,8 +1267,8 @@ export default function App() {
           </div>
 
           {!gameState.gameEnded && (
-            <div style={{display:'flex',gap:'8px'}}>
-              <div style={{background:'white',padding:'8px',borderRadius:'10px',width:'150px',display:'flex',flexDirection:'column',gap:'6px'}}>
+            <div style={{display:'flex',gap:'8px',flexDirection:isMobileMode ? 'column' : 'row'}}>
+              <div style={{background:'white',padding:'8px',borderRadius:'10px',width:isMobileMode ? '100%' : '150px',display:'flex',flexDirection:'column',gap:'6px'}}>
                 {selectedPlayerName === myName ? (
                   <>
                     <h4 style={{margin:0,fontSize:'12px'}}>
@@ -1161,51 +1307,25 @@ export default function App() {
             </div>
           )}
 
-          {/* Current Player's Tiles */}
-          <div style={{background:'white',padding:'8px',borderRadius:'10px',flex:1,display:'flex',flexDirection:'column',minHeight:0,overflow:'hidden'}}>
-            <h4 style={{margin:'0 0 8px 0',fontSize:'13px'}}>
-              {selectedPlayerName === myName ? 'Your Tiles' : `${selectedPlayerName}'s Tiles`} ({(gameState.tiles[selectedPlayerName] || []).length})
-            </h4>
-            <div style={{overflowY:'auto',flex:1,paddingRight:'5px'}}>
-              <div style={{display:'grid',gridTemplateColumns:'repeat(3,1fr)',gap:'8px',alignContent:'start'}}>
-                {(gameState.tiles[selectedPlayerName] || []).map(t => (
-                  <div 
-                    key={`${selectedPlayerName}-${t.id}`} 
-                    draggable={selectedPlayerName === myName && myPlayerIndex === gameState.currentPlayer && !gameState.pendingVote && !gameState.gameEnded && !ambiguousPlacement} 
-                    onDragStart={(e)=>onDragStart(e,t)} 
-                    onDrag={onDrag} 
-                    onDragEnd={onDragEnd}
-                    style={{
-                      height:'72px',
-                      border:'1px solid #ccc',
-                      borderRadius:'4px',
-                      cursor: selectedPlayerName === myName && myPlayerIndex === gameState.currentPlayer && !gameState.pendingVote && !gameState.gameEnded && !ambiguousPlacement ? 'grab' : 'default',
-                      padding:'4px',
-                      background:'white',
-                      opacity: dragging?.id === t.id ? 0 : 1,
-                      display:'flex',
-                      alignItems:'center',
-                      justifyContent:'center'
-                    }}
-                  >
-                    <img src={IMAGES[t.type]} style={{maxWidth:'100%',maxHeight:'100%',width:'auto',height:'auto',objectFit:'contain',display:'block',pointerEvents:'none'}} alt="" draggable={false}/>
-                  </div>
-                ))}
-              </div>
-            </div>
-          </div>
+          {!isMobileMode && tilePanel}
         </div>
       </div>
 
+      {isMobileMode && (
+        <div style={{marginTop:'10px'}}>
+          {tilePanel}
+        </div>
+      )}
+
       {/* Dragging preview */}
-      {dragging && (
+      {!isMobileMode && dragging && (
         <div style={{position:'fixed',left:dragPos.x,top:dragPos.y,transform:'translate(-50%, -50%)',pointerEvents:'none',zIndex:10000}}>
           <img src={IMAGES[dragging.type]} style={{width:'auto',maxWidth:'120px',height:'auto',maxHeight:'120px',objectFit:'contain',opacity:0.9,background:'white',border:'2px solid #333',borderRadius:'4px',padding:'3px'}} alt="" draggable={false}/>
         </div>
       )}
 
       {ambiguousPlacement && (
-        <div onMouseDown={(e) => setDraggingPopup({type:'ambiguous', offsetX: e.clientX - currentAmbiguousPopupPosition.x, offsetY: e.clientY - currentAmbiguousPopupPosition.y})} style={{position:'fixed',left:`${currentAmbiguousPopupPosition.x}px`,top:`${currentAmbiguousPopupPosition.y}px`,background:'rgba(255,255,255,0.98)',padding:'16px',borderRadius:'12px',boxShadow:'0 8px 25px rgba(0,0,0,0.3)',zIndex:1500,width:'360px',maxWidth:'90vw',cursor:'move'}}>
+        <div onMouseDown={(e) => { if (!isMobileMode) setDraggingPopup({type:'ambiguous', offsetX: e.clientX - currentAmbiguousPopupPosition.x, offsetY: e.clientY - currentAmbiguousPopupPosition.y}); }} style={{position:'fixed',left:`${currentAmbiguousPopupPosition.x}px`,top:`${currentAmbiguousPopupPosition.y}px`,background:'rgba(255,255,255,0.98)',padding:'16px',borderRadius:'12px',boxShadow:'0 8px 25px rgba(0,0,0,0.3)',zIndex:1500,width:'360px',maxWidth:'90vw',cursor:isMobileMode ? 'default' : 'move'}}>
           <h4 style={{margin:'0 0 8px 0'}}>Choose railroad to extend</h4>
           <div style={{fontSize:'12px',color:'#555',marginBottom:'10px'}}>Click either railroad worker to switch the preview, then confirm.</div>
           <div style={{display:'flex',gap:'8px',marginBottom:'10px'}}>
@@ -1250,7 +1370,7 @@ export default function App() {
 
       {/* Voting panel */}
       {gameState.pendingVote && !wildcardChoice && (
-        <div onMouseDown={(e) => setDraggingPopup({type:'vote', offsetX: e.clientX - votePopupPosition.x, offsetY: e.clientY - votePopupPosition.y})} style={{position:'fixed',left:`${votePopupPosition.x}px`,top:`${votePopupPosition.y}px`,background:'white',padding:'20px',borderRadius:'15px',boxShadow:'0 4px 20px rgba(0,0,0,0.3)',zIndex:1000,maxHeight:'70vh',overflowY:'auto',width:'320px',cursor:'move'}}>
+        <div onMouseDown={(e) => { if (!isMobileMode) setDraggingPopup({type:'vote', offsetX: e.clientX - votePopupPosition.x, offsetY: e.clientY - votePopupPosition.y}); }} style={{position:'fixed',left:`${votePopupPosition.x}px`,top:`${votePopupPosition.y}px`,background:'white',padding:'20px',borderRadius:'15px',boxShadow:'0 4px 20px rgba(0,0,0,0.3)',zIndex:1000,maxHeight:'70vh',overflowY:'auto',width:'320px',cursor:isMobileMode ? 'default' : 'move'}}>
           <h3 style={{margin:'0 0 15px 0'}}>Outhouse - Vote!</h3>
           {!allVotesSubmitted ? (
             <>
